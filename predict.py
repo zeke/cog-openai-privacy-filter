@@ -41,6 +41,7 @@ class Predictor(BasePredictor):
         """
         raw_spans = self.classifier(text, aggregation_strategy=aggregation_strategy)
         spans = self._merge_adjacent([self._normalize_span(s) for s in raw_spans])
+        spans = self._trim_whitespace(spans, text)
         redacted_text = self._redact(text, spans)
         summary = self._summarize(spans)
         return {
@@ -73,6 +74,29 @@ class Predictor(BasePredictor):
             else:
                 merged.append(span.copy())
         return merged
+
+    def _trim_whitespace(self, spans: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:
+        """Trim leading/trailing whitespace from span boundaries.
+
+        The HuggingFace tokenizer often includes a leading space in token text
+        (e.g. " Alice" instead of "Alice"). Without trimming, the redacted
+        output would lose the space before the placeholder.
+        """
+        trimmed: list[dict[str, Any]] = []
+        for span in spans:
+            start, end = span["start"], span["end"]
+            while start < end and text[start].isspace():
+                start += 1
+            while end > start and text[end - 1].isspace():
+                end -= 1
+            if end <= start:
+                continue
+            new_span = span.copy()
+            new_span["start"] = start
+            new_span["end"] = end
+            new_span["text"] = text[start:end]
+            trimmed.append(new_span)
+        return trimmed
 
     def _redact(self, text: str, spans: list[dict[str, Any]]) -> str:
         valid_spans = [s for s in spans if s["end"] > s["start"]]
