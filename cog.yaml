@@ -11,6 +11,5 @@ build:
     - "tqdm"
   run:
     - "pip install git+https://github.com/openai/privacy-filter.git"
-    - "python download_weights.py"
 predict: "predict.py:Predictor"
 image: "r8.im/zeke/openai-privacy-filter"

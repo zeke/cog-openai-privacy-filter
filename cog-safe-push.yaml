@@ -1,5 +1,5 @@
 model: zeke/openai-privacy-filter
-test_hardware: gpu-t4-nano
+test_hardware: gpu-t4
 predict:
   compare_outputs: true
   predict_timeout: 300
