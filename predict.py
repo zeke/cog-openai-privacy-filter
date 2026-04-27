@@ -15,7 +15,7 @@ MODEL_ID = "openai/privacy-filter"
 
 
 class Predictor(BasePredictor):
-    def setup(self) -> None:
+    def setup(self):
         device = 0 if torch.cuda.is_available() else -1
         self.classifier = pipeline(
             task="token-classification",
