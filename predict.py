@@ -40,7 +40,7 @@ class Predictor(BasePredictor):
             summary: counts by label
         """
         raw_spans = self.classifier(text, aggregation_strategy=aggregation_strategy)
-        spans = [self._normalize_span(s) for s in raw_spans]
+        spans = self._merge_adjacent([self._normalize_span(s) for s in raw_spans])
         redacted_text = self._redact(text, spans)
         summary = self._summarize(spans)
         return {
@@ -58,6 +58,21 @@ class Predictor(BasePredictor):
             "start": int(span.get("start", 0)),
             "end": int(span.get("end", 0)),
         }
+
+    def _merge_adjacent(self, spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Merge consecutive spans with the same label into single spans."""
+        if not spans:
+            return spans
+        merged: list[dict[str, Any]] = [spans[0].copy()]
+        for span in spans[1:]:
+            prev = merged[-1]
+            if span["label"] == prev["label"] and span["start"] <= prev["end"]:
+                prev["end"] = max(prev["end"], span["end"])
+                prev["text"] = prev["text"] + span["text"]
+                prev["score"] = min(prev["score"], span["score"])
+            else:
+                merged.append(span.copy())
+        return merged
 
     def _redact(self, text: str, spans: list[dict[str, Any]]) -> str:
         valid_spans = [s for s in spans if s["end"] > s["start"]]
