@@ -1,48 +1,85 @@
 """Cog predictor for OpenAI Privacy Filter (PII detection and redaction)."""
 
 import json
-import logging
+import os
 import shutil
 import sys
 import traceback
 from pathlib import Path
 
+# Set tiktoken cache dir BEFORE importing tiktoken anywhere.
+# This must match the path used at build time so the cached BPE file is reused.
+os.environ.setdefault("TIKTOKEN_CACHE_DIR", "/root/.tiktoken_cache")
+
 from cog import BasePredictor, Input
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("privacy-filter")
+
+def log(msg):
+    """Print to both stdout and stderr with flush, to maximize chance of capture."""
+    line = f"[setup] {msg}"
+    print(line, flush=True)
+    print(line, file=sys.stderr, flush=True)
 
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load the model onto GPU."""
+        """Load the model onto GPU. Wraps in try/except to log full traceback."""
         try:
             self._setup()
-        except Exception as e:
-            log.error(f"Setup failed: {type(e).__name__}: {e}")
-            traceback.print_exc(file=sys.stderr)
+        except BaseException as e:
+            log(f"SETUP FAILED: {type(e).__name__}: {e}")
+            tb = traceback.format_exc()
+            for line in tb.splitlines():
+                log(line)
             raise
 
     def _setup(self):
+        log(f"Python: {sys.version}")
+        log(f"TIKTOKEN_CACHE_DIR={os.environ.get('TIKTOKEN_CACHE_DIR')}")
+        log(f"cwd={os.getcwd()}")
+
+        log("Importing torch...")
         import torch
+
+        log(f"torch={torch.__version__}, CUDA available={torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            log(f"CUDA device: {torch.cuda.get_device_name(0)}")
+
+        log("Importing tiktoken...")
         import tiktoken
+
+        log(f"tiktoken={tiktoken.__version__}")
+
+        log("Importing safetensors...")
         import safetensors
 
-        log.info(f"Python: {sys.version}")
-        log.info(f"torch: {torch.__version__}")
-        log.info(f"tiktoken: {tiktoken.__version__}")
-        log.info(f"safetensors: {safetensors.__version__}")
-        log.info(f"CUDA available: {torch.cuda.is_available()}")
-        if torch.cuda.is_available():
-            log.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
-            log.info(f"CUDA capability: {torch.cuda.get_device_capability(0)}")
+        log(f"safetensors={safetensors.__version__}")
 
-        # Download weights explicitly with logging
+        # Verify tiktoken cache directory contents
+        cache_dir = Path(os.environ.get("TIKTOKEN_CACHE_DIR", ""))
+        if cache_dir.is_dir():
+            log(f"tiktoken cache contents at {cache_dir}:")
+            for f in sorted(cache_dir.iterdir()):
+                log(f"  {f.name}: {f.stat().st_size} bytes")
+        else:
+            log(f"tiktoken cache dir does not exist: {cache_dir}")
+
+        # Test tiktoken encoding before doing anything else
+        log("Testing tiktoken.get_encoding('o200k_base')...")
+        try:
+            enc = tiktoken.get_encoding("o200k_base")
+            log(f"tiktoken encoding loaded OK, n_vocab={enc.n_vocab}")
+            log(f"  test encode: {enc.encode('hello world')}")
+        except BaseException as e:
+            log(f"tiktoken FAILED: {type(e).__name__}: {e}")
+            raise
+
+        # Download model weights
         checkpoint_dir = Path.home() / ".opf" / "privacy_filter"
         config_path = checkpoint_dir / "config.json"
 
         if not config_path.is_file():
-            log.info(f"Downloading model weights to {checkpoint_dir}...")
+            log(f"Downloading model weights to {checkpoint_dir}...")
             from huggingface_hub import snapshot_download
 
             snapshot_download(
@@ -52,51 +89,36 @@ class Predictor(BasePredictor):
             )
             original = checkpoint_dir / "original"
             if original.is_dir():
-                log.info("Promoting files from original/ subdir")
+                log("Promoting files from original/ subdir")
                 for p in original.iterdir():
                     dest = checkpoint_dir / p.name
                     if not dest.exists():
                         shutil.move(str(p), str(dest))
                 original.rmdir()
-            log.info("Download complete")
+            log("Download complete")
         else:
-            log.info(f"Using existing checkpoint at {checkpoint_dir}")
+            log(f"Using existing checkpoint at {checkpoint_dir}")
 
-        # Inspect the checkpoint
-        assert config_path.is_file(), f"Missing config.json at {config_path}"
+        # Inspect checkpoint
         with open(config_path) as f:
             config = json.load(f)
-        log.info(f"Checkpoint config keys: {sorted(config.keys())}")
-        log.info(f"  encoding: {config.get('encoding')}")
-        log.info(f"  num_hidden_layers: {config.get('num_hidden_layers')}")
-        log.info(f"  d_model: {config.get('d_model')}")
-
-        # List checkpoint files
-        log.info("Checkpoint files:")
+        log(f"Config: encoding={config.get('encoding')}, num_hidden_layers={config.get('num_hidden_layers')}, vocab_size={config.get('vocab_size')}")
+        log("Checkpoint files:")
         for f in sorted(checkpoint_dir.iterdir()):
             if f.is_file():
-                size_mb = f.stat().st_size / 1e6
-                log.info(f"  {f.name}: {size_mb:.1f} MB")
+                log(f"  {f.name}: {f.stat().st_size / 1e6:.1f} MB")
 
-        # Verify tiktoken encoding works before loading model
-        encoding_name = config.get("encoding")
-        if encoding_name:
-            log.info(f"Testing tiktoken encoding: {encoding_name}")
-            try:
-                enc = tiktoken.get_encoding(encoding_name)
-                log.info(f"tiktoken encoding OK (n_vocab={enc.n_vocab})")
-            except Exception as e:
-                log.error(f"tiktoken.get_encoding({encoding_name!r}) failed: {e}")
-                # Don't raise here, let opf try its own loading path
-
-        # Load the OPF model
-        log.info("Loading OPF model...")
+        # Load OPF model
+        log("Importing opf._api.OPF...")
         from opf._api import OPF
 
+        log("Constructing OPF instance...")
         self.model = OPF(device="cuda", output_mode="typed")
-        log.info("Warming up with sample input...")
+
+        log("Warming up model with redact()...")
         self.model.redact("warmup")
-        log.info("Setup complete")
+
+        log("Setup complete!")
 
     def predict(
         self,

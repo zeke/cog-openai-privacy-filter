@@ -11,5 +11,7 @@ build:
     - "tqdm"
   run:
     - "pip install git+https://github.com/openai/privacy-filter.git"
+    - "mkdir -p /root/.tiktoken_cache"
+    - "TIKTOKEN_CACHE_DIR=/root/.tiktoken_cache python -c \"import tiktoken; enc = tiktoken.get_encoding('o200k_base'); print(f'tiktoken o200k_base ready, n_vocab={enc.n_vocab}')\""
 predict: "predict.py:Predictor"
 image: "r8.im/zeke/openai-privacy-filter"
